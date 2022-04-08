@@ -2,6 +2,8 @@
 
 #' @title AutoScore STEP(i): Rank variables with machine learning (AutoScore Module 1)
 #' @param train_set A processed \code{data.frame} that contains data to be analyzed, for training.
+#' @param validation_set A processed \code{data.frame} that contains data to be analyzed, for auc-based ranking.
+#' @param method method for ranking. Options: 1. `rf` - random forest (default), 2. `auc` - auc-based (required validation set). For "auc", univariate models will be built based on the train set, and the variable ranking is constructed via the AUC performance of corresponding univariate models on the validation set (`validation_set`).
 #' @param ntree Number of trees in the random forest (Default: 100).
 #' @details The first step in the AutoScore framework is variable ranking. We use random forest (RF),
 #' an ensemble machine learning algorithm, to identify the top-ranking predictors for subsequent score generation.
@@ -22,24 +24,64 @@
 #' @export
 #' @importFrom randomForest randomForest importance
 #'
-AutoScore_rank <- function(train_set, ntree = 100) {
-  #set.seed(4)
-  train_set$label <- as.factor(train_set$label)
-  model <-
-    randomForest::randomForest(label ~ .,
-                               data = train_set,
-                               ntree = ntree,
-                               preProcess = "scale")
+AutoScore_rank <- function(train_set, validation_set = NULL, method = "rf", ntree = 100) {
+  # set.seed(4)
+  if (method == "rf") {
+    train_set$label <- as.factor(train_set$label)
+    model <-
+      randomForest::randomForest(label ~ .,
+        data = train_set,
+        ntree = ntree,
+        preProcess = "scale"
+      )
 
-  # estimate variable importance
-  importance <- randomForest::importance(model, scale = F)
+    # estimate variable importance
+    importance <- randomForest::importance(model, scale = F)
 
-  # summarize importance
-  names(importance) <- rownames(importance)
-  importance <- sort(importance, decreasing = T)
-  cat("The ranking based on variable importance was shown below for each variable: \n")
-  print(importance)
-  return(importance)
+    # summarize importance
+    names(importance) <- rownames(importance)
+    importance <- sort(importance, decreasing = T)
+    cat("The ranking based on variable importance was shown below for each variable: \n")
+    print(importance)
+    return(importance)
+  }
+
+
+  if (method == "auc") {
+    if (is.null(validation_set)) {
+      stop("Error: Please specify the validation set","\n",call.=FALSE)
+    }
+    vars <- names(train_set)
+    vars <- vars[vars != "label"]
+    train_set$label <- as.factor(train_set$label)
+    AUC <- rep(0, length(vars))
+
+    for (i in 1:length(vars)) {
+      # log <- sprintf("--------%s--------", vars[i])
+      # print(log)
+      if (length(unique(train_set[[vars[i]]])) > 1) {
+        model <-
+          glm(label ~ ., data = train_set[c("label", vars[i])], family = binomial(link = "logit"))
+        pred <- predict(model, newdata = validation_set[c("label", vars[i])])
+        # confusionMatrix(pred, as.factor(as.character(val_set$label)))
+        roc_obj <- roc(response = validation_set$label, predictor = as.numeric(pred), quiet = TRUE)
+        AUC[i] <- auc(roc_obj)[[1]]
+      } else {
+        # if model can't be built
+        AUC[i] = 0
+      }
+    }
+
+    # summarize importance (AUC)
+    names(AUC) <- vars
+    AUC <- sort(AUC, decreasing = T)
+    cat("The auc-based ranking based on variable importance was shown below for each variable: \n")
+    print(AUC)
+    return(AUC)
+  }
+  else {
+     warning("Please specify methods among available options: rf, auc\n")
+  }
 }
 
 
@@ -57,6 +99,8 @@ AutoScore_rank <- function(train_set, ntree = 100) {
 #' @param quantiles Predefined quantiles to convert continuous variables to categorical ones. (Default: c(0, 0.05, 0.2, 0.8, 0.95, 1)) Available if \code{categorize = "quantile"}.
 #' @param max_cluster The max number of cluster (Default: 5). Available if \code{categorize = "kmeans"}.
 #' @param do_trace If set to TRUE, all results based on each fold of cross-validation would be printed out and plotted (Default: FALSE). Available if \code{cross_validation = TRUE}.
+#' @param auc_lim_min Min y_axis limit in the parsimony plot (Default: 0.5).
+#' @param auc_lim_max Max y_axis limit in the parsimony plot (Default: "adaptive").
 #' @details This is the second step of the general AutoScore workflow, to generate the parsimony plot to help select a parsimonious model.
 #'  In this step, it goes through AutoScore Module 2,3 and 4 multiple times and to evaluate the performance under different variable list.
 #'  The generated parsimony plot would give researcher an intuitive figure to choose the best models.
@@ -103,7 +147,9 @@ AutoScore_parsimony <-
            categorize = "quantile",
            quantiles = c(0, 0.05, 0.2, 0.8, 0.95, 1),
            max_cluster = 5,
-           do_trace = FALSE) {
+           do_trace = FALSE,
+           auc_lim_min = 0.5,
+           auc_lim_max = "adaptive") {
     if (n_max > length(rank)) {
       warning(
         "WARNING: the n_max (",
@@ -187,20 +233,40 @@ AutoScore_parsimony <-
       auc_set$sum <- rowSums(auc_set) / fold
       cat("***list of final mean AUC values through cross-validation are shown below \n")
       print(data.frame(auc_set$sum))
-      plot(
-        auc_set$sum,
-        main = paste(
-          "Final Parsimony Plot based on ",
-          fold,
-          "-fold Cross Validation",
-          sep = ""
-        ),
-        xlab = "Number of Variables",
-        ylab = "Area Under the Curve",
-        col = "#2b8cbe",
-        lwd = 2,
-        type = "o"
-      )
+
+      # output final results and plot parsimony plot
+
+      if(auc_lim_max == "adaptive"){
+        auc_lim_max <- max(auc_set$sum)
+
+      }
+
+      var_names <- factor(names(rank)[n_min:n_max], levels = names(rank)[n_min:n_max])
+      dt <- data.frame(AUC = auc_set$sum, variables = var_names, num = n_min:n_max)
+      #names(AUC) <- n_min:n_max
+      #cat("list of AUC values are shown below")
+      #print(data.frame(AUC))
+      p <- ggplot(data = dt, mapping = aes_string(x = "variables", y = "AUC")) +
+        geom_bar(stat = "identity", fill = "steelblue") +
+        coord_cartesian(ylim = c(auc_lim_min, auc_lim_max))+
+        theme_bw() +
+        labs(x = "", y = "Area Under the Curve", title = paste("Final parsimony plot based on ", fold,
+                                                             "-fold cross validation", sep = "")) +
+        theme(legend.position = "none",
+              axis.text = element_text(size = 12),
+              axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+      paste("Final Parsimony Plot based on ", fold,
+        "-fold Cross Validation", sep = "")
+
+      # Add number of variables to bar:
+      if (nrow(dt) >= 100) {
+        print( p + geom_text(aes(label = dt$num), vjust = 1.5, colour = "white", angle = 90))
+      } else {
+        print( p + geom_text(aes(label = dt$num), vjust = 1.5, colour = "white"))
+      }
+
+
       return(auc_set)
     }
 
@@ -231,19 +297,36 @@ AutoScore_parsimony <-
         AUC <- c(AUC, auc(model_roc))
       }
 
+      if(auc_lim_max == "adaptive"){
+        auc_lim_max <- max(AUC)
+
+      }
+
+
       # output final results and plot parsimony plot
+      var_names <- factor(names(rank)[n_min:n_max], levels = names(rank)[n_min:n_max])
+      dt <- data.frame(AUC = AUC, variables = var_names, num = n_min:n_max)
       names(AUC) <- n_min:n_max
       #cat("list of AUC values are shown below")
       #print(data.frame(AUC))
-      plot(
-        AUC,
-        main = "Parsimony Plot on the Validation Set",
-        xlab = "Number of Variables",
-        ylab = "Area Under the Curve",
-        col = "#2b8cbe",
-        lwd = 2,
-        type = "o"
-      )
+      p <- ggplot(data = dt, mapping = aes_string(x = "variables", y = "AUC")) +
+        geom_bar(stat = "identity", fill = "steelblue") +
+        coord_cartesian(ylim = c(auc_lim_min, auc_lim_max))+
+        theme_bw() +
+        labs(x = "", y = "Area Under the Curve", title = "Parsimony plot on the validation set") +
+        theme(legend.position = "none",
+              axis.text = element_text(size = 12),
+              axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+
+
+      # Add number of variables to bar:
+      if (nrow(dt) >= 100) {
+        print( p + geom_text(aes(label = dt$num), vjust = 1.5, colour = "white", angle = 90))
+      } else {
+        print( p + geom_text(aes(label = dt$num), vjust = 1.5, colour = "white"))
+      }
+
 
       return(AUC)
     }
@@ -428,7 +511,7 @@ AutoScore_testing <-
 
       # Final evaluation based on testing set
       plot_roc_curve(test_set_3$total_score, as.numeric(y_test) - 1)
-      cat("***Performance using AutoScore (based on unseen test Set):\n")
+      cat("***Performance using AutoScore:\n")
       model_roc <- roc(y_test, test_set_3$total_score, quiet = T)
       print_roc_performance(y_test, test_set_3$total_score, threshold = threshold)
       #Modelprc <- pr.curve(test_set_3$total_score[which(y_test == 1)],test_set_3$total_score[which(y_test == 0)],curve = TRUE)
@@ -468,10 +551,10 @@ check_data <- function(data) {
   #1. check label and binary
   if (is.null(data$label))
     stop(
-      "ERROR: for this dataset: These is no dependent variable 'lable' to indicate the outcome. Please add one first\n"
+      "ERROR: for this dataset: These is no dependent variable 'label' to indicate the outcome. Please add one first\n"
     )
   if (length(levels(factor(data$label))) != 2)
-    warning("Please keep outcome lable variable binary\n")
+    warning("Please keep outcome label variable binary\n")
 
   #2. check each variable
   non_num_fac <- c()
@@ -480,10 +563,12 @@ check_data <- function(data) {
 
   for (i in names(data)) {
     if ((class(data[[i]]) != "factor") &&
-        (class(data[[i]]) != "numeric"))
+        (class(data[[i]]) != "numeric")&&
+        (class(data[[i]]) != "integer")&&
+        (class(data[[i]]) != "logical"))
       non_num_fac <- c(non_num_fac, i)
     if ((length(levels(data[[i]])) > 10) &&
-        (class(data[[i]]) == "factor"))
+        (is.factor(data[[i]])))
       fac_large <- c(fac_large, i)
 
     if (grepl(",", i))
@@ -513,7 +598,7 @@ check_data <- function(data) {
         )
       )
 
-    if (class(data[[i]]) == "factor") {
+    if (is.factor(data[[i]])) {
       if (sum(grepl(",", levels(data[[i]]))) > 0)
         warning(
           paste0(
@@ -550,7 +635,7 @@ check_data <- function(data) {
   if (!is.null(non_num_fac))
     warning(
       paste(
-        "\nWARNING: the dataset has variable of character and user should transform them to factor before using AutoScore:\n",
+        "\nWARNING: the dataset has variable of character and user should transform them to factor or numeric before using AutoScore:(consider using 'df$xxx  <- as.factor(df$xxx))' or 'df$xxx  <- as.numeric(df$xxx))'\n",
         non_num_fac
       )
     )
@@ -923,6 +1008,66 @@ print_roc_performance <-
     )
   }
 
+#' @title AutoScore function: Print conversion table based on final performance evaluation
+#' @description Print conversion table based on final performance evaluation
+#' @param pred_score a vector with outcomes and final scores generated from \code{\link{AutoScore_fine_tuning}}
+#' @param by specify correct method for categorizing the threshold:  by "risk" or "score".Default to "risk"
+#' @param values A vector of threshold for analyze sensitivity, specificity and other metrics. Default to "c(0.01,0.05,0.1,0.2,0.5)"
+#' @seealso \code{\link{AutoScore_testing}}
+#' @return No return value and the conversion will be printed out directly.
+#' @export
+#' @import pROC knitr
+conversion_table<-function(pred_score, by = "risk", values = c(0.01,0.05,0.1,0.2,0.5)){
+
+  glmmodel<-glm(Label~pred_score,data = pred_score,family = binomial(link="logit"))
+  pred_score$pred_risk<-predict(glmmodel,newdata=pred_score, type = "response")
+  rtotoal<-data.frame(matrix(nrow=0,ncol=7))
+  Modelroc<-roc(pred_score$Label,pred_score$pred_risk)
+
+  if(by=="risk"){
+    for(i in values){
+      r<-data.frame(i)
+      r$i<-paste(r$i*100,"%",sep="")
+      names(r)[1]<-"Predicted Risk"
+      r$`Score cut-off`<-paste("",min(pred_score[pred_score$pred_risk>=i,]$pred_score),sep="")
+      r$`Percentage of patients (%)`<-round(length(pred_score[pred_score$pred_risk>=i,][,1])/length(pred_score[,1]),digits = 2)*100
+      r1<-organize_performance(ci.coords(Modelroc,x=i ,input="threshold", ret=c("accuracy", "sensitivity","specificity" ,
+                                                                                "ppv", "npv" )))
+      #r1$X1<-NULL
+      r<-cbind(r,r1)
+      rtotoal<-rbind(rtotoal,r)
+    }
+
+    names(rtotoal)<-c("Predicted Risk [>=]", "Score cut-off [>=]", "Percentage of patients (%)","Accuracy (95% CI)",
+                      "Sensitivity (95% CI)", "Specificity (95% CI)", "PPV (95% CI)",
+                      "NPV (95% CI)")
+
+  }else if(by=="score"){
+    for(i in values){
+      r<-data.frame(i)
+      risk<-min(pred_score[pred_score$pred_score>=i,]$pred_risk)
+      risk<-round(risk,3)
+      r$risk<-paste(risk*100,"%",sep="")
+      r$`Percentage of patients (%)`<-round(length(pred_score[pred_score$pred_risk>=risk,][,1])/length(pred_score[,1]),digits = 2)*100
+      r1<-organize_performance(ci.coords(Modelroc,x=risk ,input="threshold", ret=c("accuracy", "sensitivity","specificity" ,
+                                                                                   "ppv", "npv" )))
+      #r1$X1<-NULL
+      r<-cbind(r,r1)
+      rtotoal<-rbind(rtotoal,r)
+    }
+
+    names(rtotoal)<-c("Score cut-off [>=]","Predicted Risk [>=]",  "Percentage of patients (%)","Accuracy (95% CI)",
+                      "Sensitivity (95% CI)", "Specificity (95% CI)", "PPV (95% CI)",
+                      "NPV (95% CI)")
+
+
+
+  } else{ stop('ERROR: please specify correct method for categorizing the threshold:  by "risk" or "score".')}
+
+   kable(rtotoal,align=c(rep('c',times=7)))
+
+}
+
 
 # Internal_function -------------------------------------------------------
 ## built-in function for AutoScore below
@@ -1046,7 +1191,7 @@ get_cut_vec <-
 
     for (i in 1:(length(df) - 1)) {
       # for factor variable
-      if (class(df[, i]) == "factor") {
+      if (is.factor(df[, i])) {
         if (length(levels(df[, i])) < 10)
           #(next)() else stop("ERROR: The number of categories should be less than 10")
           (next)()
@@ -1114,7 +1259,7 @@ transform_df_fixed <- function(df, cut_vec) {
 
   # for loop going through all variables
   for (i in 1:(length(df) - 1)) {
-    if (class(df[, i]) == "factor") {
+    if (is.factor(df[, i])) {
       if (length(levels(df[, i])) < 10)
         (next)()
       else
@@ -1174,29 +1319,38 @@ plot_roc_curve <- function(prob, labels, quiet = TRUE) {
   # prob<-predict(model.glm,newdata=X_test, type = 'response')
   model_roc <- roc(labels, prob, quiet = quiet)
   auc <- auc(model_roc)
+  auc_ci <- ci.auc(model_roc)
 
-  roc.data <-
-    data.frame(fpr = as.vector(
-      coords(
-        model_roc,
-        "local maximas",
-        ret = "1-specificity",
-        transpose = TRUE
-      )
-    ), tpr = as.vector(
-      coords(
-        model_roc,
-        "local maximas",
-        ret = "sensitivity",
-        transpose = TRUE
-      )
-    ))
-  p <-
-    ggplot(roc.data, aes_string(x = "fpr", ymin = 0, ymax = "tpr")) + geom_ribbon(alpha = 0.2) + geom_line(aes_string(y = "tpr")) + xlab("1-Specificity") +
-    ylab("Sensitivity") + ggtitle(paste0(
-      "Receiver Operating Characteristic (ROC) Curve \nAUC=",
-      round(auc, digits = 4)
-    ))
+  roc.data <- data.frame(
+    fpr = as.vector(coords(model_roc,
+                           "local maximas", ret = "1-specificity", transpose = TRUE)),
+    tpr = as.vector(coords(model_roc, "local maximas", ret = "sensitivity",
+                           transpose = TRUE)))
+
+  auc_ci <- sort(as.numeric(auc_ci)) # should include AUC and 95% CI
+  clr <- rgb(red = 41, green = 70, blue = 76, maxColorValue = 255)
+  clr_axis <- rgb(red = 25, green = 24, blue = 24, maxColorValue = 255)
+  p<-ggplot(data.frame(fpr = roc.data$fpr, tpr = roc.data$tpr),
+            aes_string(x = "fpr", ymin = 0, ymax = "tpr")) +
+    #geom_ribbon(alpha = 0.2, fill = clr) +
+    geom_line(aes_string(y = "tpr"), color = clr, lwd = 1.2) +
+    geom_abline(slope = 1, intercept = 0, lty = 2, lwd = 0.3, color = clr_axis) +
+    # scale_color_manual(values = ) +
+    scale_x_continuous(expand = c(0, 0), limits = c(0, 1)) +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, 1)) +
+    labs(x = "1-Specificity", y = "Sensitivity",
+         title = "Receiver Operating Characteristic Curve",
+         subtitle = sprintf("AUC=%.3f, 95%% CI: %.3f-%.3f",
+                            auc_ci[2], auc_ci[1], auc_ci[3])) +
+    theme_classic() +
+    theme(plot.margin = unit(c(0.5,0.5,0.5,0.5),"cm"),
+          axis.text= element_text(size=12),
+          text = element_text(size = 12, color = clr_axis),
+          #text = element_text(family = "Tahoma", size = 12, color = clr_axis),
+          # axis.line = element_line(color = clr_axis, size = 0.3),
+          axis.line = element_blank(),
+          axis.ticks.length = unit(0.15, units = "cm"),
+          panel.border = element_rect(color = clr_axis, fill = NA))
   print(p)
 }
 
@@ -1208,6 +1362,7 @@ plot_roc_curve <- function(prob, labels, quiet = TRUE) {
 change_reference <- function(df, coef_vec) {
   # delete label first
   df_tmp <- subset(df, select = names(df)[names(df) != "label"])
+  names(coef_vec) <- gsub("[`]", "", names(coef_vec)) # remove the possible "`" in the names
 
   # one loops to go through all variable
   for (i in (1:length(df_tmp))) {
@@ -1232,7 +1387,7 @@ change_reference <- function(df, coef_vec) {
     # }
   }
 
-  # add lable again
+  # add label again
   df_tmp$label <- df$label
   return(df_tmp)
 }
@@ -1243,6 +1398,7 @@ change_reference <- function(df, coef_vec) {
 #' @param coef_vec Generated from logistic regression
 #' @return Processed \code{vector} for generating the scoring table
 add_baseline <- function(df, coef_vec) {
+  names(coef_vec) <- gsub("[`]", "", names(coef_vec)) # remove the possible "`" in the names
   df <- subset(df, select = names(df)[names(df) != "label"])
   coef_names_all <- unlist(lapply(names(df), function(var_name) {
     paste0(var_name, levels(df[, var_name]))
@@ -1286,6 +1442,23 @@ getmode <- function(vect) {
   uniqvect <- unique(vect)
   uniqvect[which.max(tabulate(match(vect, uniqvect)))]
 }
+
+organize_performance<-function(w1){
+  df <- data.frame(w1)
+  df <- round(df, digits = 3)*100
+  df1 <- data.frame(1)
+  df1 <- data.frame(`Accuracy (95% CI)`=paste(df$accuracy.50.,"% (",df$accuracy.2.5.,"-",df$accuracy.97.5.,"%)",sep = ""),
+                    `Sensitivity (95% CI)`=paste(df$sensitivity.50.,"% (",df$sensitivity.2.5.,"-",df$sensitivity.97.5.,"%)",sep = ""),
+                    `Specificity (95% CI)`=paste(df$specificity.50.,"% (",df$specificity.2.5.,"-",df$specificity.97.5.,"%)",sep = ""),
+                    `PPV (95% CI)`=paste(df$ppv.50.,"% (",df$ppv.2.5.,"-",df$ppv.97.5.,"%)",sep = ""),
+                    `NPV (95% CI)`=paste(df$npv.50.,"% (",df$npv.2.5.,"-",df$npv.97.5.,"%)",sep = ""),
+                    check.names = FALSE)
+
+  #print(df1)
+  return(df1)
+}
+
+
 
 
 #' 20000 simulated ICU admission data, with the same distribution as the data in the MIMIC-III ICU database

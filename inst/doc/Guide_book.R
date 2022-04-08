@@ -43,7 +43,16 @@ validation_set <- out_split$validation_set
 test_set <- out_split$test_set
 
 ## -----------------------------------------------------------------------------
-ranking <- AutoScore_rank(train_set, ntree = 100)
+ranking <- AutoScore_rank(train_set, method = "rf", ntree = 100)
+
+## ----echo=FALSE---------------------------------------------------------------
+ranking_temp <- ranking
+
+## -----------------------------------------------------------------------------
+ranking <- AutoScore_rank(train_set, method = "auc", validation_set = validation_set)
+
+## ----echo=FALSE---------------------------------------------------------------
+ranking <- ranking_temp
 
 ## -----------------------------------------------------------------------------
 AUC <- AutoScore_parsimony(
@@ -54,7 +63,9 @@ AUC <- AutoScore_parsimony(
     n_min = 1,
     n_max = 20,
     categorize = "quantile",
-    quantiles = c(0, 0.05, 0.2, 0.8, 0.95, 1)
+    quantiles = c(0, 0.05, 0.2, 0.8, 0.95, 1),
+    auc_lim_min = 0.5,
+    auc_lim_max = "adaptive"
   )
 
 
@@ -78,7 +89,7 @@ final_variables <- names(ranking[c(1:num_var, 9, 10)])
 num_var <- 6
 final_variables <- names(ranking[1:num_var])
 
-## ----weighting,  warning = FALSE----------------------------------------------
+## ----weighting,fig.width=5,fig.height=5,warning = FALSE-----------------------
 cut_vec <- AutoScore_weighting( 
     train_set,
     validation_set,
@@ -112,7 +123,7 @@ cut_vec$Age <- c(25, 50, 75, 90)
 cut_vec$Age <- c(50, 75, 90)
 
 
-## ----scoring, warning = FALSE-------------------------------------------------
+## ----scoring,fig.width=5,fig.height=5, warning = FALSE------------------------
 cut_vec$lactate_mean <- c(0.2, 1, 3, 4)
 cut_vec$bun_mean <- c(10, 40)
 cut_vec$aniongap_mean <- c(10, 17)
@@ -124,15 +135,44 @@ scoring_table <- AutoScore_fine_tuning(train_set,
                         max_score = 100)
 
 
-## -----------------------------------------------------------------------------
-pred_score <- AutoScore_testing(test_set, final_variables, cut_vec, scoring_table, threshold = "best", with_label = TRUE)
+## ----fig.width=5,fig.height=5,warning = FALSE---------------------------------
+pred_score <-
+  AutoScore_testing(
+    test_set,
+    final_variables,
+    cut_vec,
+    scoring_table,
+    threshold = "best",
+    with_label = TRUE
+  )
 head(pred_score)
-
-## ----csv_generate3, eval=FALSE------------------------------------------------
-#  write.csv(pred_score, file = "D:/pred_score.csv")
 
 ## -----------------------------------------------------------------------------
 print_roc_performance(pred_score$Label, pred_score$pred_score, threshold = 50)
+
+## ----message=FALSE, warning=FALSE, error=FALSE--------------------------------
+conversion_table(pred_score, by ="risk", values = c(0.01,0.05,0.1,0.2,0.5))
+
+## ---- message=FALSE, warning = FALSE------------------------------------------
+conversion_table(pred_score, by = "score", values = c(20,40,60,75,90))
+
+## ----fig.show="hide",fig.width=5,fig.height=5,warning = FALSE-----------------
+pred_score_train <-
+  AutoScore_testing(
+    train_set,
+    final_variables,
+    cut_vec,
+    scoring_table,
+    threshold = "best",
+    with_label = TRUE
+  )
+
+## ----message=FALSE, warning=FALSE, error=FALSE--------------------------------
+conversion_table(pred_score_train, by ="risk", values = c(0.01,0.05,0.1,0.2,0.5))
+
+## ----csv_generate3, eval=FALSE------------------------------------------------
+#  write.csv(pred_score, file = "D:/pred_score.csv")
+#  write.csv(pred_score_train, file = "D:/pred_score_train.csv")
 
 ## -----------------------------------------------------------------------------
 data("sample_data_small")
@@ -143,6 +183,9 @@ out_split <- split_data(data = sample_data_small, ratio = c(0.7, 0, 0.3), cross_
 train_set <- out_split$train_set
 validation_set <- out_split$validation_set
 test_set <- out_split$test_set
+
+## -----------------------------------------------------------------------------
+ranking <- AutoScore_rank(train_set, validation_set = validation_set, ntree = 100)
 
 ## -----------------------------------------------------------------------------
 ranking <- AutoScore_rank(train_set, ntree = 100)
@@ -183,7 +226,7 @@ final_variables <- names(ranking[c(1:num_var, 9, 10)])
 num_var <- 5
 final_variables <- names(ranking[1:num_var])
 
-## ----weighting2,  warning = TRUE----------------------------------------------
+## ----weighting2,fig.width=5,fig.height=5,warning = TRUE-----------------------
 cut_vec <- AutoScore_weighting( 
     train_set,
     validation_set,
@@ -219,7 +262,7 @@ cut_vec$bun_mean <- c(45, 60)
 ## ---- results = "hide", warning=FALSE, message=FALSE,eval=TRUE,include=FALSE----
 cut_vec$bun_mean <- c(45, 60)
 
-## ----scoring2, warning = TRUE-------------------------------------------------
+## ----scoring2,fig.width=5,fig.height=5, warning = TRUE------------------------
 cut_vec$lactate_mean <- c(1, 2, 3)
 cut_vec$Age <- c(35, 50, 80)
 cut_vec$aniongap_mean <- c(8, 12, 18)
@@ -231,15 +274,23 @@ scoring_table <- AutoScore_fine_tuning(train_set,
                         max_score = 100)
 
 
-## -----------------------------------------------------------------------------
-pred_score <- AutoScore_testing(test_set, final_variables, cut_vec, scoring_table, threshold = "best", with_label = TRUE)
+## ----fig.width=5,fig.height=5-------------------------------------------------
+pred_score <-
+  AutoScore_testing(
+    test_set,
+    final_variables,
+    cut_vec,
+    scoring_table,
+    threshold = "best",
+    with_label = TRUE
+  )
 head(pred_score)
-
-## ----csv_generate, eval=FALSE-------------------------------------------------
-#  write.csv(pred_score, file = "D:/pred_score.csv")
 
 ## -----------------------------------------------------------------------------
 print_roc_performance(pred_score$Label, pred_score$pred_score, threshold = 90)
+
+## ----csv_generate, eval=FALSE-------------------------------------------------
+#  write.csv(pred_score, file = "D:/pred_score.csv")
 
 ## ----table one, warning = FALSE-----------------------------------------------
 compute_descriptive_table(sample_data)
